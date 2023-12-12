@@ -1,24 +1,25 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session 
-from shared.models import Users
-from shared.schemas import User
-from shared.database import SessionLocal
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated
-from fastapi import Depends,HTTPException, status
-from fastapi.security import  OAuth2PasswordRequestForm
-
-SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
+from fastapi import APIRouter,Depends,HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from shared.schemas import User,Token,TokenData,UserInDB
+from sqlalchemy.orm import Session 
+from shared.database import SessionLocal
 
 router = APIRouter(
     
-    prefix="/user",
-    tags=["user"],
+    prefix="/employee",
+    tags=["employee"],
     responses={404: {"description": "Not found"}},
 )
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+SECRET_KEY = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 def get_db():
     db = SessionLocal()
@@ -26,58 +27,68 @@ def get_db():
         yield db
     finally:
         db.close()
-        
-# @router.get("/")
-# def get_all_Users(db: Session):
-#     return db.query(Users).all()
-@router.get("/")
-def get_all_Users(db: Session = Depends(get_db)):
-    return db.query(Users).all()
 
-@router.get("/{customer_id}")
-def get_customer_based_on_id(customer_id: int,db: Session = Depends(get_db)):
-    db_customer = db.query(Users).filter(Users.id == customer_id).first()
-    return db_customer
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
-@router.post("/", response_model=User)
-def create_new_customer(customer: User, db: Session = Depends(get_db)):
-    CAPSname = customer.name.upper()
-    new_customer = Users(
-        name=CAPSname,
-        phone=customer.phone,
-        number_of_guests=customer.number_of_guests,
-        room_number=customer.room_number,
-        Bill=customer.Bill,
-        aadhar=customer.aadhar,
+def get_password_hash(password):
+    return pwd_context.hash(password)
+ 
+
+def get_user(db, username: str):
+    if username in db:
+        user_dict = db[username]
+        return UserInDB(**user_dict)
+
+def authenticate_user(ac, username: str, password: str):
+    user = get_user(ac, username)
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(ac,token: Annotated[str, Depends(oauth2_scheme)]):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
     )
-    db.add(new_customer)
-    db.commit()
-    db.refresh(new_customer)
-    return new_customer
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    user = get_user(ac, username=token_data.username)
+    if user is None:
+        raise credentials_exception
+    return user
 
-@router.put("/{customer_id}")
-def update_customer(customer_id: int, customer: User, db: Session = Depends(get_db)):
-    db_customer = db.query(Users).filter(Users.id == customer_id).first()
-    if db_customer:
-        for attr, value in vars(customer).items():
-            setattr(db_customer, attr, value) if value is not None else None
-        db.commit()
-        db.refresh(db_customer)
-        return db_customer
-    return None
-
-@router.delete("/{customer_id}",response_model=User)
-def delete_customer_record(customer_id: int, db: Session = Depends(get_db)):
-    db_customer = db.query(Users).filter(Users.id == customer_id).first()
-    if db_customer is None:
-        raise HTTPException(status_code=404, detail="customer not found")
-    db.delete(db_customer)
-    db.commit()
-    return db_customer
+async def get_current_active_user(
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    if current_user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
 
 @router.post("/token", response_model=Token)
-async def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm, Depends()]):
-    user = authenticate_user(fake_users_db, form_data.username, form_data.password)
+async def login_for_access_token(form_data: Annotated[OAuth2PasswordRequestForm, Depends()],db: Session = Depends(get_db)):
+    ac=db.query(User).all()
+    print(ac)
+    user = authenticate_user(ac, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

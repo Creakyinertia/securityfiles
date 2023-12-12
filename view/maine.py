@@ -13,6 +13,3 @@ Base.metadata.create_all(bind=engine)
 
 app.include_router(users.router)
 
-@app.get("/")
-async def root():
-    return {"message": "Hello Bigger Applications!"}
